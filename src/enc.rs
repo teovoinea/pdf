@@ -83,8 +83,6 @@ fn decode_85(data: &[u8]) -> Result<Vec<u8>> {
 
 
 fn flate_decode(data: &[u8], params: &Option<Dictionary>) -> Result<Vec<u8>> {
-    println!("DEBUG PARAMS {:?}", params.as_ref().unwrap());
-    println!("DEBUG DATA(len: {}): {:?}", data.len(), data);
     // TODO: write macro
     let predictor = match *params {
         Some(ref params) => params.get("Predictor").map_or(Ok(1), |x| x.as_integer())?,
@@ -114,24 +112,34 @@ fn flate_decode(data: &[u8], params: &Option<Dictionary>) -> Result<Vec<u8>> {
         n += num_bytes_read;
         out.extend(result);
     }
+    println!("DEBUG PARAMS {:?}", params.as_ref().unwrap());
+    println!("DEBUG DATA(len: {}): {:?}", out.len(), &out);
 
+    assert!(out.len() % (columns+1) == 0);
     // Then unfilter (PNG)
-    // For this, take the old out as input, and write output to out
-    let input = out.clone();
+    let input = out;
+    let mut out = Vec::<u8>::new();
+    out.resize(input.len() / (columns+1) * columns, 0); // One less byte per row
 
     if predictor > 10 {
         // Apply inverse predictor
         let null_vec = vec![0; columns];
         let mut prev_row: &[u8] = &null_vec;
-        let mut i = 0;
-        while i < input.len() {
-            // +1 because the first byte on each row is predictor
-            let predictor_nr = input[i];
-            let current_range = (i+1)..(i+1+columns);
-            let row = &mut out[current_range.clone()];
-            unfilter(PredictorType::from_u8(predictor_nr)?, n_components, prev_row, row);
-            prev_row = & input[current_range];
-            i += columns;
+        let mut i_in = 0;
+        let mut i_out = 0;
+        while i_in < input.len() {
+            // +1 generally because the first byte on each row is predictor
+            
+            let predictor_nr = input[i_in];
+            let row = &input[(i_in+1)..(i_in+1+columns)];
+            let out_row = &mut out[(i_out)..(i_out+columns)];
+
+            unfilter(PredictorType::from_u8(predictor_nr)?, n_components, prev_row, row, out_row);
+
+            prev_row = &input[(i_in+1)..(i_in+1+columns)];
+
+            i_in += columns + 1;
+            i_out += columns;
         }
     }
     Ok(out)
@@ -195,53 +203,49 @@ fn filter_paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-pub fn unfilter(filter: PredictorType, bpp: usize, previous: &[u8], current: &mut [u8]) {
+pub fn unfilter(filter: PredictorType, bpp: usize, previous: &[u8], current: &[u8], out: &mut [u8]) {
     use self::PredictorType::*;
     let len = current.len();
-
     match filter {
         NoFilter => (),
         Sub => {
             for i in bpp..len {
-                current[i] = current[i].wrapping_add(
-                    current[i - bpp]
-                );
+                out[i] = current[i].wrapping_add(current[i - bpp]);
             }
         }
         Up => {
             for i in 0..len {
-                current[i] = current[i].wrapping_add(
-                    previous[i]
-                );
+                out[i] = current[i].wrapping_add(previous[i]);
             }
         }
         Avg => {
             for i in 0..bpp {
-                current[i] = current[i].wrapping_add(
+                out[i] = current[i].wrapping_add(
                     previous[i] / 2
                 );
             }
 
             for i in bpp..len {
-                current[i] = current[i].wrapping_add(
+                out[i] = current[i].wrapping_add(
                     ((current[i - bpp] as i16 + previous[i] as i16) / 2) as u8
                 );
             }
         }
         Paeth => {
             for i in 0..bpp {
-                current[i] = current[i].wrapping_add(
+                out[i] = current[i].wrapping_add(
                     filter_paeth(0, previous[i], 0)
                 );
             }
 
             for i in bpp..len {
-                current[i] = current[i].wrapping_add(
+                out[i] = current[i].wrapping_add(
                     filter_paeth(current[i - bpp], previous[i], previous[i - bpp])
                 );
             }
         }
     }
+
 }
 
 pub fn filter(method: PredictorType, bpp: usize, previous: &[u8], current: &mut [u8]) {
